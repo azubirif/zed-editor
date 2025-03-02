@@ -1,21 +1,43 @@
+// includes
+#include <asm-generic/ioctls.h>
+#include<errno.h>
 #include<stdio.h>
 #include<ctype.h>
 #include<unistd.h>
 #include<termios.h>
 #include<stdlib.h>
+#include<sys/ioctl.h>
 
+// defines
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+// data
 //Configuración original
-struct termios og_termios;
+struct editorConfig
+{
+    struct termios og_termios;
+    int screenRows;
+    int screenCols;
+};
 
+struct editorConfig E;
+
+// terminal
 void die(const char *s)
 {
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
+    
     perror(s); //Imprimir error
     exit(1);
 }
 
 void disableRawMode()
 {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &og_termios);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.og_termios) == -1)
+    {
+        die("tcsetattr");
+    }
 }
 
 void enableRawMode()
@@ -24,11 +46,11 @@ void enableRawMode()
     // continua sin tener que pulsar 'Enter'
 
     //Guardamos la configuración actual en og_termios
-    tcgetattr(STDIN_FILENO, &og_termios);
+    if (tcgetattr(STDIN_FILENO, &E.og_termios) == -1) die("tcgetattr");
     //Llamar a la función cuando se llame a 'exit'
     atexit(disableRawMode);
     
-    struct termios raw = og_termios;
+    struct termios raw = E.og_termios;
     //Desactivar modo canónico para leer byte por byte
     raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
     raw.c_iflag &= ~(IXON | ICRNL);
@@ -46,21 +68,110 @@ void enableRawMode()
     // Ctrl-Q lo activa de nuevo
 
     //Le pasamos los atributos al terminal
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+}
+
+int getCursorPosition(int *rows, int *cols)
+{
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+
+    printf("\r\n");
+    char c;
+
+    while(read(STDIN_FILENO, &c, 1) == 1)
+    {
+        if (iscntrl(c)) printf("%d\r\n", c);
+        else printf("%d - '%c\r\n'", c, c);
+    }
+
+    editorReadKey();
+
+    return -1;
+}
+
+// output
+void editorDrawRows()
+{
+    for (int y = 0; y < E.screenRows; y++)
+    {
+        write(STDOUT_FILENO, "~\r\n", 3);
+    }
+}
+
+void editorRefreshScreen()
+{
+    //4: escribimos 4 bytes al terminal
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
+
+    editorDrawRows();
+
+    write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+char editorReadKey()
+{
+    //Esta función espera a leer una entrada de texto y la devuelve.
+    int nread;
+    char c;
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1)
+    {
+        if (nread == -1 && errno != EAGAIN) die("read");
+    }
+
+    return c;
+}
+
+int getWindowSize(int *rows, int *cols)
+{
+    struct winsize ws;
+
+    //Error handling
+    if (1 || ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+    {
+        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+        return getCursorPosition(rows, cols);
+    }
+    else
+    {
+        *cols = ws.ws_col;
+        *rows = ws.ws_row;
+
+        return 0;
+    }
+}
+
+void editorProcessKeypress()
+{
+    char c = editorReadKey();
+
+    switch(c)
+    {
+        case CTRL_KEY('q'):
+            
+            write(STDOUT_FILENO, "\x1b[2J", 4);
+            write(STDOUT_FILENO, "\x1b[H", 3);
+            exit(0);
+            break;
+    }
+}
+
+// init
+void initEditor()
+{
+    if (getWindowSize(&E.screenRows, &E.screenCols) == -1) die("getWindowSize");
 }
 
 int main()
 {
     enableRawMode();
+    initEditor();
     
-    char c;
-    //Leemos de forma continua 1 byte hasta que no pueda mas
-    // Devolverá 0 cuando no pueda seguir leyendo
-    while(read(STDIN_FILENO, &c, 1) == 1 && c != 'q')
+    while (1)
     {
-        //Si es carácter de control, solo imprimir ASCII
-        if (iscntrl(c)) printf("%d\r\n", c);
-        else printf("%d - '%c'\r\n", c, c);
+        editorRefreshScreen();
+        editorProcessKeypress();
     }
+    
     return 0;
 }
